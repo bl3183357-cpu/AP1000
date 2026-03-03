@@ -100,7 +100,7 @@ def main():
     q_L_avg = q_avg_rod / H_core
     q_flux_avg = q_avg_rod / (np.pi * D_co * H_core)
     
-    # 需求2: 最大线功率与最大热流密度
+    # 要求2: 最大线功率与最大热流密度
     q_L_max = q_L_avg * F_q_N * F_q_E
     q_flux_max = q_flux_avg * F_q_N * F_q_E
 
@@ -115,12 +115,12 @@ def main():
         h_current_avg += (dq_avg / 1000.0) / (G_avg * A_channel)
         h_avg_arr[i] = h_current_avg
     
-    # 需求1: 堆芯平均冷却剂出口温度
+    # 要求1: 堆芯平均冷却剂出口温度
     T_out_avg = get_T_from_h(h_avg_arr[-1])
     rho_out_avg = get_density(T_out_avg)
     rho_avg_core = (rho_in + rho_out_avg) / 2.0
 
-    # --- 计算平均管的压降 (需求6) ---
+    # --- 计算平均管的压降 (要求6) ---
     dyn_p_in_avg = (G_avg**2) / (2.0 * rho_in)
     dyn_p_out_avg = (G_avg**2) / (2.0 * rho_out_avg)
     dyn_p_avg_core = (G_avg**2) / (2.0 * rho_avg_core)
@@ -207,7 +207,7 @@ def main():
         DNBR_arr[i] = chf / max(q_flux_local, 1e-6)
 
     # =========================================================================
-    # 打印输出 (严格对应您的 6 点需求)
+    # 打印输出 
     # =========================================================================
     print("="*60)
     print(" 堆芯热工水力计算结果报告")
@@ -231,26 +231,26 @@ def main():
     print("="*60)
 
     # =========================================================================
-    # 绘图输出 (对应需求 3 和 5)
+    # 绘图输出 (对应要求 3 和 5)
     # =========================================================================
     plt.rcParams['font.sans-serif'] = ['SimHei']  
     plt.rcParams['axes.unicode_minus'] = False    
     
     fig = plt.figure(figsize=(14, 10))
     
-    # 图 1: 温度分布 (需求 3)
+    # 图 1: 温度分布 (要求 3)
     ax1 = fig.add_subplot(221)
     ax1.plot(z, T_0_arr, 'r-', lw=2, label=f'芯块中心 T_0 (max={np.max(T_0_arr):.0f}℃)')
     ax1.plot(z, T_ci_arr, 'orange', lw=1.5, label=f'包壳内表面 T_ci')
     ax1.plot(z, T_co_arr, 'g-', lw=2, label=f'包壳外表面 T_co')
     ax1.plot(z, T_b_arr, 'b--', lw=2, label=f'冷却剂 T_b')
-    ax1.set_title("图1: 热通道轴向温度分布 (需求3)")
+    ax1.set_title("图1: 热通道轴向温度分布 (要求3)")
     ax1.set_xlabel("轴向高度 (m)")
     ax1.set_ylabel("温度 (℃)")
     ax1.grid(True, alpha=0.3)
     ax1.legend(fontsize=9)
     
-    # 图 2: 热流密度与线功率 (辅助需求 2)
+    # 图 2: 热流密度与线功率 (辅助要求 2)
     ax2 = fig.add_subplot(222)
     line1 = ax2.plot(z, q_flux_arr/1e6, 'r-', lw=2, label="表面热流密度 q''")
     ax2.set_ylabel("表面热流密度 (MW/m^2)", color='r')
@@ -263,21 +263,21 @@ def main():
     ax2.set_title("图2: 热流密度与线功率轴向分布")
     ax2.grid(True, alpha=0.3)
     
-    # 图 3: DNBR 分布 (需求 5)
+    # 图 3: DNBR 分布 (要求 5)
     ax3 = fig.add_subplot(223)
     ax3.plot(z, DNBR_arr, 'k-', lw=2, label=f'DNBR (MDNBR={np.min(DNBR_arr):.2f})')
     ax3.axhline(1.3, color='r', linestyle='--', label='安全限值 (1.3)')
-    ax3.set_title("图3: DNBR 轴向分布 (需求5)")
+    ax3.set_title("图3: DNBR 轴向分布 (要求5)")
     ax3.set_xlabel("轴向高度 (m)")
     ax3.set_ylabel("DNBR")
     ax3.set_ylim(0, max(10, np.min(DNBR_arr)*3))
     ax3.grid(True, alpha=0.3)
     ax3.legend()
     
-    # 图 4: 冷却剂焓值分布 (需求 3)
+    # 图 4: 冷却剂焓值分布 (要求 3)
     ax4 = fig.add_subplot(224)
     ax4.plot(z, h_hot_arr, 'c-', lw=2, label='热管冷却剂焓值')
-    ax4.set_title("图4: 热管冷却剂焓值轴向分布 (需求3)")
+    ax4.set_title("图4: 热管冷却剂焓值轴向分布 (要求3)")
     ax4.set_xlabel("轴向高度 (m)")
     ax4.set_ylabel("焓值 (kJ/kg)")
     ax4.grid(True, alpha=0.3)
