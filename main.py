@@ -35,7 +35,7 @@ params = {
 def get_uo2_k(T_c):
     """UO2 导热系数 (W/m·K)，IAEA推荐，95%TD新鲜燃料"""
     Tk = T_c + 273.15
-    return 100.0 / (6.75 + 0.0235 * Tk) + 6400.0 * np.exp(-16350.0 / Tk) / Tk**2
+    return 100.0 / (6.75 + 0.0235 * Tk) + 6.4e9 * np.exp(-16350.0 / Tk) / Tk**2
 
 
 def get_gap_conductance(q_linear):
@@ -52,9 +52,9 @@ def get_gap_conductance(q_linear):
 def jens_lottes_wall_temp(q_flux, P_mpa, T_sat):
     """
     Jens-Lottes 过冷核态沸腾壁温
-    ΔT_sat = 0.792 * (q''/1e6)^0.25 * exp(-P/6.2)
+    ΔT_sat = 25.0 * (q''/1e6)^0.25 * exp(-P/6.2)
     """
-    dT = 0.792 * (q_flux / 1e6)**0.25 * np.exp(-P_mpa / 6.2)
+    dT = 25.0 * (q_flux / 1e6)**0.25 * np.exp(-P_mpa / 6.2)
     return T_sat + dT
 
 
@@ -252,8 +252,15 @@ def run_simulation():
         # 芯块中心温度迭代
         t_center = t_us + 400.0
         for _ in range(50):
-            k_u = get_uo2_k((t_center + t_us) / 2.0)
-            new_t0 = t_us + q_linear / (4.0 * np.pi * k_u)
+            # 分别计算表面、中点、中心的导热系数
+            k_us = get_uo2_k(t_us)
+            k_mid = get_uo2_k((t_center + t_us) / 2.0)
+            k_center = get_uo2_k(t_center)
+            
+            # 辛普森积分近似求等效 k
+            k_eff = (k_us + 4.0 * k_mid + k_center) / 6.0
+            
+            new_t0 = t_us + q_linear / (4.0 * np.pi * k_eff)
             if abs(new_t0 - t_center) < 0.01:
                 break
             t_center = 0.6 * new_t0 + 0.4 * t_center

@@ -1,0 +1,12 @@
+name: ap1000
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy
+  - matplotlib
+  - pandas
+  - pip
+  - pip:
+      - iapws
