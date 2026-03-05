@@ -1,403 +1,368 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from iapws import IAPWS97
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext
 
-# ==========================================
-# 1. 基础设计参数 (AP1000)
-# ==========================================
-params = {
-    "P_sys": 15.51,            # 系统压力 MPa
-    "Q_total": 3400e6,         # 额定热功率 W
-    "W_total": 14314,          # 总冷却剂流量 kg/s
-    "T_in": 279.4,             # 堆芯入口温度 °C
-    "H_core": 4.2672,          # 堆芯有效高度 m
-    "N_assy": 157,
-    "N_rods": 264,
-    "D_out": 0.0095,           # 包壳外径 m
-    "D_in": 0.00836,           # 包壳内径 m
-    "D_pellet": 0.00819,       # 芯块直径 m
-    "Pitch": 0.0126,           # 栅距 m
-    "F_u": 0.974,              # 燃料发热份额
-    "Bypass": 0.059,           # 旁流系数
-    "Fq_N": 2.524,             # 核热点因子 (极值约束)
-    "FdH_N": 1.65,             # 核焓升因子 (径向因子)
-    "Fq_E": 1.03,              # 工程热点因子 (局部制造偏差)
-    "FdH_E": 1.085,            # 流量不确定性因子
-    # ---- 压降参数 ----
-    "N_grids": 8,
-    "K_grid": 0.6,
-    "g": 9.81,
-}
+# =============================================================================
+# 1. 基础物性与经验关联式 (全局变量由UI动态更新)
+# =============================================================================
+P_SYS = 15.51       # MPa
+T_SAT = 344.8       # ℃
 
-# ==========================================
-# 2. 物理关联式模块
-# ==========================================
+def get_h_from_T(T):
+    water = IAPWS97(P=P_SYS, T=T + 273.15)
+    return water.h
+
+def get_T_from_h(h):
+    water = IAPWS97(P=P_SYS, h=h)
+    return water.T - 273.15
+
+def get_density(T):
+    water = IAPWS97(P=P_SYS, T=T + 273.15)
+    return water.rho
+
 def get_uo2_k(T_c):
-    """UO2 导热系数 (W/m·K)，IAEA推荐，95%TD新鲜燃料"""
     Tk = T_c + 273.15
     return 100.0 / (6.75 + 0.0235 * Tk) + 6.4e9 * np.exp(-16350.0 / Tk) / Tk**2
 
-
-def get_gap_conductance(q_linear):
-    """气隙等效导热系数 (W/m²K)，随线功率变化"""
-    if q_linear > 25000:
-        return 10000.0
-    elif q_linear > 15000:
-        frac = (q_linear - 15000.0) / 10000.0
-        return 5000.0 + 5000.0 * frac
-    else:
-        return 5000.0
-
-
-def jens_lottes_wall_temp(q_flux, P_mpa, T_sat):
-    """
-    Jens-Lottes 过冷核态沸腾壁温
-    ΔT_sat = 25.0 * (q''/1e6)^0.25 * exp(-P/6.2)
-    """
-    dT = 25.0 * (q_flux / 1e6)**0.25 * np.exp(-P_mpa / 6.2)
+def jens_lottes_wall_temp(q_flux_W_m2, T_sat):
+    dT = 25.0 * (q_flux_W_m2 / 1e6)**0.25 * np.exp(-P_SYS / 6.2)
     return T_sat + dT
 
-
-def calculate_w3_full(P, h_local, h_in, q_local, D_h, G):
-    """W-3 CHF关联式，返回DNBR"""
-    if q_local < 1.0:
-        return 99.9
-    try:
-        sat_f = IAPWS97(P=P, x=0)
-        sat_g = IAPWS97(P=P, x=1)
-        h_f = sat_f.h * 1000.0
-        h_g = sat_g.h * 1000.0
-        x = (h_local - h_f) / (h_g - h_f)
-
-        P_psi = P * 145.038
-        G_Mlb = (G * 0.2048 * 3600) / 1e6
-        De_inch = D_h * 39.37
-        h_f_btu = h_f * 0.0004299
-        h_in_btu = h_in * 0.0004299
-
-        term1 = 2.022 - 0.0004302 * P_psi
-        term2 = (0.1722 - 0.0000984 * P_psi) * np.exp(
-            (18.177 - 0.004129 * P_psi) * x
-        )
-        term3 = (0.1484 - 1.596 * x + 0.1729 * x * abs(x)) * G_Mlb + 1.037
-        term4 = 1.157 - 0.869 * x
-        term5 = 0.2664 + 0.8357 * np.exp(-3.151 * De_inch)
-        term6 = 0.8258 + 0.000794 * (h_f_btu - h_in_btu)
-
-        q_chf = (term1 + term2) * term3 * term4 * term5 * term6 * 1e6 * 3.15459
-        return q_chf / q_local
-    except Exception:
-        return 1.3
-
-
-# ==========================================
-# 3. 轴向功率分布构造
-# ==========================================
-def build_axial_profile(z_nodes, H, Fq_N, FdH_N):
-    """
-    构造轴向功率分布 φ(z)，满足：
-      - ∫φ dz / H = 1  (归一化)
-      - φ_max = F_q / F_dH = F_z  (峰化因子约束)
+def get_chf_w3(P_MPa, G_SI, De_SI, h_local_SI, h_in_SI):
+    P_psia = P_MPa * 145.038
+    G_Mlb = (G_SI * 737.338) / 1e6
+    De_in = De_SI * 39.3701
+    H_in_Btu = h_in_SI * 0.4299
+    H_local_Btu = h_local_SI * 0.4299
     
-    方法：使用截断余弦 + 功率偏移因子
-      φ(z) = A * cos(π(z - z_peak)/H_e) + B
-    其中 z_peak 允许轻微偏离中心（模拟燃耗/毒物效应）
+    H_f_Btu = 1630.0 * 0.4299
+    H_fg_Btu = 966.0 * 0.4299
     
-    这里采用更简洁的方法：对正弦分布施加展平变换
-      φ_raw = sin^α(πz/H)，调节 α 使峰值因子匹配
-    """
-    F_z_target = Fq_N / FdH_N  # = 2.524 / 1.65 = 1.530
-
-    # 用 sin^α 分布：峰值始终为1，均值随 α 变化
-    # 需要找到 α 使得 max/mean = F_z_target
-    # 即 1/mean(sin^α) = F_z_target → mean(sin^α) = 1/F_z_target
-
-    target_mean = 1.0 / F_z_target
-
-    # 二分法求 α
-    alpha_lo, alpha_hi = 0.01, 5.0
-    for _ in range(100):
-        alpha_mid = (alpha_lo + alpha_hi) / 2.0
-        phi_test = np.sin(np.pi * z_nodes / H) ** alpha_mid
-        mean_test = np.mean(phi_test)
-        if mean_test > target_mean:
-            alpha_lo = alpha_mid
-        else:
-            alpha_hi = alpha_mid
-        if abs(mean_test - target_mean) < 1e-8:
-            break
-
-    alpha = (alpha_lo + alpha_hi) / 2.0
-    phi_raw = np.sin(np.pi * z_nodes / H) ** alpha
-    phi = phi_raw / np.mean(phi_raw)  # 归一化使均值 = 1
-
-    return phi, alpha
+    X_loc = (H_local_Btu - H_f_Btu) / H_fg_Btu
+    
+    term1 = (2.022 - 0.0004302 * P_psia) + (0.1722 - 0.0000984 * P_psia) * np.exp((18.177 - 0.004129 * P_psia) * X_loc)
+    term2 = (0.1484 - 1.596 * X_loc + 0.1729 * X_loc * abs(X_loc)) * G_Mlb + 1.037
+    term3 = 1.157 - 0.869 * X_loc
+    term4 = 0.2664 + 0.8357 * np.exp(-3.151 * De_in)
+    term5 = 0.8258 + 0.000794 * (H_f_Btu - H_in_Btu)
+    
+    q_chf_Mbtu = term1 * term2 * term3 * term4 * term5
+    return q_chf_Mbtu * 3.15459
 
 
-# ==========================================
-# 4. 主计算流程
-# ==========================================
-def run_simulation():
-    n = 100  # 增加节点数以提高精度
-    z_nodes = np.linspace(0, params["H_core"], n)
-    dz = params["H_core"] / n
+# =============================================================================
+# 2. 核心计算逻辑
+# =============================================================================
+def run_calculation(params, output_text):
+    global P_SYS, T_SAT
+    
+    # 更新全局压力和温度
+    P_SYS = params['P_SYS']
+    T_SAT = params['T_SAT']
+    
+    # 提取参数
+    Q_total = params['Q_total']
+    W_total = params['W_total']
+    T_in = params['T_in']
+    H_core = params['H_core']
+    N_assy = int(params['N_assy'])
+    N_rods_per_assy = int(params['N_rods_per_assy'])
+    D_co = params['D_co']
+    D_ci = params['D_ci']
+    D_p = params['D_p']
+    Pitch = params['Pitch']
+    Bypass_ratio = params['Bypass_ratio']
+    Heat_frac = params['Heat_frac']
+    F_q_N = params['F_q_N']
+    F_q_E = params['F_q_E']
+    F_dH_E = params['F_dH_E']
+    
+    K_in, K_out, K_grid, N_grid = 0.75, 1.0, 1.05, 10
+    f_fric = 0.015            
+    h_gap = 10000.0           
+    k_clad = 16.0             
 
-    # --------------------------------------------------
-    # 【关键修正】构造满足 F_q 约束的轴向分布
-    # --------------------------------------------------
-    phi_z, alpha = build_axial_profile(
-        z_nodes, params["H_core"], params["Fq_N"], params["FdH_N"]
-    )
+    # --- 计算有关堆参数 ---
+    N_rods_total = N_assy * N_rods_per_assy
+    A_channel = Pitch**2 - np.pi/4 * D_co**2  
+    De = 4 * A_channel / (np.pi * D_co)       
+    
+    W_core_active = W_total * (1 - Bypass_ratio)
+    h_in = get_h_from_T(T_in)
+    rho_in = get_density(T_in)
 
-    F_z_actual = np.max(phi_z)
-    F_z_target = params["Fq_N"] / params["FdH_N"]
-    Fq_check = params["FdH_N"] * F_z_actual
+    n_nodes = 100
+    dz = H_core / n_nodes
+    z = np.linspace(dz/2, H_core - dz/2, n_nodes)
+    alpha = 0.8844
+    phi_z = np.sin(np.pi * z / H_core)**alpha
+    phi_z = phi_z / np.mean(phi_z) 
+    
+    F_z_max = np.max(phi_z)
+    F_xy = F_q_N / F_z_max
+    
+    q_avg_rod = (Q_total * Heat_frac) / N_rods_total
+    q_L_avg = q_avg_rod / H_core
+    q_flux_avg = q_avg_rod / (np.pi * D_co * H_core)
+    
+    q_L_max = q_L_avg * F_q_N * F_q_E
+    q_flux_max = q_flux_avg * F_q_N * F_q_E
 
-    print(f"[轴向分布] 展平指数 α = {alpha:.4f}")
-    print(f"[轴向分布] φ_max = {F_z_actual:.4f} (目标 F_z = {F_z_target:.4f})")
-    print(f"[轴向分布] φ_mean = {np.mean(phi_z):.4f} (应为 1.0)")
-    print(f"[校核] F_dH × φ_max = {params['FdH_N']:.3f} × {F_z_actual:.3f} = {Fq_check:.3f}")
-    print(f"[校核] F_q 设计限值 = {params['Fq_N']:.3f}")
-    if abs(Fq_check - params["Fq_N"]) < 0.01:
-        print(f"  ✓ F_q 约束满足 (偏差 {abs(Fq_check - params['Fq_N']):.4f})")
-    else:
-        print(f"  ⚠ F_q 约束偏差 = {abs(Fq_check - params['Fq_N']):.4f}")
+    G_avg = W_core_active / (N_rods_total * A_channel)
 
-    # 几何与流量
-    total_rods = params["N_assy"] * params["N_rods"]
-    A_flow = params["Pitch"]**2 - np.pi / 4 * params["D_out"]**2
-    De = 4 * A_flow / (np.pi * params["D_out"])
+    # --- 计算平均管冷却剂的焓场分布 ---
+    h_avg_arr = np.zeros(n_nodes)
+    h_current_avg = h_in
+    for i in range(n_nodes):
+        dq_avg = q_L_avg * phi_z[i] * dz
+        h_current_avg += (dq_avg / 1000.0) / (G_avg * A_channel)
+        h_avg_arr[i] = h_current_avg
+    
+    T_out_avg = get_T_from_h(h_avg_arr[-1])
+    rho_out_avg = get_density(T_out_avg)
+    rho_avg_core = (rho_in + rho_out_avg) / 2.0
 
-    # 热通道流量（FdH_E 作为流量不确定性因子）
-    W_rod_avg = params["W_total"] * (1 - params["Bypass"]) / total_rods
-    W_rod = W_rod_avg / params["FdH_E"]
-    G = W_rod / A_flow
+    # --- 计算平均管的压降 ---
+    dyn_p_in_avg = (G_avg**2) / (2.0 * rho_in)
+    dyn_p_out_avg = (G_avg**2) / (2.0 * rho_out_avg)
+    dyn_p_avg_core = (G_avg**2) / (2.0 * rho_avg_core)
+    
+    dp_fric_avg = f_fric * (H_core / De) * dyn_p_avg_core
+    dp_grav_avg = rho_avg_core * 9.81 * H_core
+    dp_in_avg = K_in * dyn_p_in_avg
+    dp_out_avg = K_out * dyn_p_out_avg
+    dp_grid_avg = N_grid * K_grid * dyn_p_avg_core
+    
+    dp_avg_total = dp_fric_avg + dp_grav_avg + dp_in_avg + dp_out_avg + dp_grid_avg
+    dp_h_e = dp_avg_total
 
-    # 堆芯平均表面热流密度
-    q_avg_surf = (params["Q_total"] * params["F_u"]) / (
-        total_rods * np.pi * params["D_out"] * params["H_core"]
-    )
-
-    # 饱和参数
-    sat_liq = IAPWS97(P=params["P_sys"], x=0)
-    T_sat = sat_liq.T - 273.15
-    h_f_sys = sat_liq.h * 1000.0
-
-    # 入口焓
-    h_in = IAPWS97(P=params["P_sys"], T=params["T_in"] + 273.15).h * 1000.0
-    h_curr = h_in
-
-    results = []
-    dp_friction = 0.0
-    dp_gravity = 0.0
-
-    print(f"\n[参数] q''_avg = {q_avg_surf / 1e3:.2f} kW/m²")
-    print(f"[参数] G = {G:.2f} kg/m²s")
-    print(f"[参数] De = {De * 1000:.2f} mm")
-    print(f"[参数] T_sat = {T_sat:.2f} °C")
-    print(f"[参数] W_rod (热通道) = {W_rod:.4f} kg/s")
-    print(f"[参数] q''_peak = {q_avg_surf * params['FdH_N'] * F_z_actual * params['Fq_E'] / 1e6:.3f} MW/m²")
-
-    for i in range(n):
-        # 热通道局部热流密度
-        q_hot = q_avg_surf * params["FdH_N"] * phi_z[i]  # 用于焓升
-        q_loc = q_hot * params["Fq_E"]                     # 用于温度（含工程因子）
-
-        # 焓升
-        dh = (q_hot * np.pi * params["D_out"] * dz) / W_rod
-        h_mid = h_curr + dh / 2.0
-        h_curr += dh
-
-        # 冷却剂物性
-        if h_mid >= h_f_sys:
-            T_b = T_sat
-            rho = sat_liq.rho
-            mu = sat_liq.mu
-            kw = sat_liq.k
-            Pr = getattr(sat_liq, 'Prandtl', getattr(sat_liq, 'Prandt', 4.0))
-        else:
-            water = IAPWS97(P=params["P_sys"], h=h_mid / 1000.0)
-            T_b = water.T - 273.15
-            rho = water.rho
-            mu = water.mu
-            kw = water.k
-            Pr = getattr(water, 'Prandtl', getattr(water, 'Prandt', 1.0))
-
-        # Dittus-Boelter 对流换热
-        Re = (G * De) / mu
-        h_conv = 0.023 * Re**0.8 * Pr**0.4 * kw / De
-        T_co_conv = T_b + q_loc / h_conv
-
-        # 壁温确定：对流 vs 过冷沸腾
-        T_co_jl = jens_lottes_wall_temp(q_loc, params["P_sys"], T_sat)
-        if T_co_conv > T_sat:
-            # 对流预测壁温超过饱和温度 → 过冷沸腾发生
-            # 沸腾增强换热，壁温被拉低到 Jens-Lottes 预测值
-            # 但不能低于饱和温度
-            t_co = max(T_co_jl, T_sat)
-        else:
-            t_co = T_co_conv
-
-        # 包壳导热
-        k_clad = 15.0
-        t_ci = t_co + q_loc * params["D_out"] * np.log(
-            params["D_out"] / params["D_in"]
-        ) / (2.0 * k_clad)
-
-        # 气隙
-        q_linear = q_loc * np.pi * params["D_out"]
-        h_gap = get_gap_conductance(q_linear)
-        t_us = t_ci + q_loc * (params["D_out"] / params["D_pellet"]) / h_gap
-
-        # 芯块中心温度迭代
-        t_center = t_us + 400.0
-        for _ in range(50):
-            # 分别计算表面、中点、中心的导热系数
-            k_us = get_uo2_k(t_us)
-            k_mid = get_uo2_k((t_center + t_us) / 2.0)
-            k_center = get_uo2_k(t_center)
+    # --- 热管等压降迭代 ---
+    G_hot = G_avg * 0.95  
+    epsilon = 1e-4
+    h_hot_arr = np.zeros(n_nodes)
+    
+    for iteration in range(100):
+        h_current_hot = h_in
+        for i in range(n_nodes):
+            dq_hot = q_L_avg * F_xy * phi_z[i] * F_dH_E * dz 
+            h_current_hot += (dq_hot / 1000.0) / (G_hot * A_channel)
+            h_hot_arr[i] = h_current_hot
             
-            # 辛普森积分近似求等效 k
+        T_out_hot = get_T_from_h(h_hot_arr[-1])
+        rho_out_hot = get_density(T_out_hot)
+        rho_avg_hot = (rho_in + rho_out_hot) / 2.0
+        
+        dyn_p_in_hot = (G_hot**2) / (2.0 * rho_in)
+        dyn_p_out_hot = (G_hot**2) / (2.0 * rho_out_hot)
+        dyn_p_avg_hot = (G_hot**2) / (2.0 * rho_avg_hot)
+        
+        dp_hot_total = (f_fric * (H_core / De) * dyn_p_avg_hot + 
+                        rho_avg_hot * 9.81 * H_core + 
+                        K_in * dyn_p_in_hot + K_out * dyn_p_out_hot + 
+                        N_grid * K_grid * dyn_p_avg_hot)
+        
+        if abs((dp_hot_total - dp_h_e) / dp_h_e) <= epsilon:
+            break
+        G_hot = G_hot * np.sqrt(dp_h_e / dp_hot_total)
+
+    # --- 计算 t0,max 与 MDNBR ---
+    T_b_arr, T_co_arr, T_ci_arr, T_us_arr, T_0_arr = [np.zeros(n_nodes) for _ in range(5)]
+    DNBR_arr, q_flux_arr, q_L_arr = [np.zeros(n_nodes) for _ in range(3)]
+    
+    for i in range(n_nodes):
+        q_L_local = q_L_avg * F_xy * phi_z[i] * F_q_E
+        q_flux_local = q_flux_avg * F_xy * phi_z[i] * F_q_E
+        
+        q_L_arr[i] = q_L_local
+        q_flux_arr[i] = q_flux_local
+        
+        h_current = h_hot_arr[i]
+        T_b = get_T_from_h(h_current)
+        T_b_arr[i] = T_b
+        
+        h_conv = 35000.0 
+        T_co_sp = T_b + q_flux_local / h_conv
+        T_co_boil = jens_lottes_wall_temp(q_flux_local, T_SAT)
+        T_co = min(T_co_sp, T_co_boil)
+        T_co_arr[i] = T_co
+        
+        T_ci = T_co + (q_L_local / (2 * np.pi * k_clad)) * np.log(D_co / D_ci)
+        T_ci_arr[i] = T_ci
+        
+        T_us = T_ci + q_flux_local * (D_co / D_p) / h_gap
+        T_us_arr[i] = T_us
+        
+        t_center = T_us + 400.0 
+        for _ in range(50):
+            k_us = get_uo2_k(T_us)
+            k_mid = get_uo2_k((t_center + T_us) / 2.0)
+            k_center = get_uo2_k(t_center)
             k_eff = (k_us + 4.0 * k_mid + k_center) / 6.0
             
-            new_t0 = t_us + q_linear / (4.0 * np.pi * k_eff)
-            if abs(new_t0 - t_center) < 0.01:
+            new_t0 = T_us + q_L_local / (4.0 * np.pi * k_eff)
+            if abs(new_t0 - t_center) < 0.01: 
                 break
             t_center = 0.6 * new_t0 + 0.4 * t_center
-        t_center = new_t0
+        T_0_arr[i] = new_t0
+        
+        chf = get_chf_w3(P_SYS, G_hot, De, h_current, h_in) * 1e6 
+        DNBR_arr[i] = chf / max(q_flux_local, 1e-6)
 
-        # DNBR
-        dnbr = calculate_w3_full(params["P_sys"], h_mid, h_in, q_loc, De, G)
+    # --- 输出报告到 UI ---
+    report = f"""============================================================
+ 堆芯热工水力计算结果报告
+============================================================
+1. 堆芯冷却剂出口温度:     {T_out_avg:.2f} ℃
 
-        # 压降
-        f = 0.184 * Re**(-0.2)
-        dp_friction += f * (dz / De) * (G**2 / (2.0 * rho))
-        dp_gravity += rho * params["g"] * dz
+2. 燃料棒表面平均热流密度: {q_flux_avg/1e6:.3f} MW/m^2
+   燃料棒表面最大热流密度: {q_flux_max/1e6:.3f} MW/m^2
+   平均线功率:             {q_L_avg/1000:.2f} kW/m
+   最大线功率:             {q_L_max/1000:.2f} kW/m
 
-        results.append({
-            "z": z_nodes[i],
-            "T_b": T_b,
-            "T_co": t_co,
-            "T_ci": t_ci,
-            "T_us": t_us,
-            "T_0": t_center,
-            "q_loc": q_loc,
-            "q_linear": q_linear,
-            "dnbr": dnbr,
-            "h_gap": h_gap,
-        })
+3. 热管的焓、包壳内外表面温度、芯块中心温度随轴向的分布: (详见生成图表1和图表4)
 
-    # 格架压降（用平均密度）
-    rho_avg = np.mean([IAPWS97(P=params["P_sys"], h=h_in/1000).rho, sat_liq.rho])
-    dp_grid = params["N_grids"] * params["K_grid"] * (G**2 / (2.0 * rho_avg))
-    total_dp = dp_friction + dp_gravity + dp_grid
+4. 包壳表面最高温度:       {np.max(T_co_arr):.1f} ℃
+   芯块中心最高温度:       {np.max(T_0_arr):.1f} ℃
 
-    return results, dp_friction, dp_gravity, dp_grid, total_dp
+5. DNBR在轴向上的变化:     (详见生成图表3), 最小DNBR值为 {np.min(DNBR_arr):.2f}
 
+6. 计算堆芯压降:           {dp_avg_total/1000:.2f} kPa
+============================================================"""
+    
+    output_text.delete(1.0, tk.END)
+    output_text.insert(tk.END, report)
 
-# ==========================================
-# 5. 绘图与输出
-# ==========================================
-if __name__ == "__main__":
-    res, dp_f, dp_g, dp_grid, dp_total = run_simulation()
-    z = [d['z'] for d in res]
-
-    T0_max = max(d['T_0'] for d in res)
-    Tco_max = max(d['T_co'] for d in res)
-    Tci_max = max(d['T_ci'] for d in res)
-    Tus_max = max(d['T_us'] for d in res)
-    T_out = res[-1]['T_b']
-    dnbr_min = min(d['dnbr'] for d in res)
-    ql_max = max(d['q_linear'] for d in res)
-
-    # ---- 四面板图 ----
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-
-    # (a) 温度分布
-    ax1 = axes[0, 0]
-    ax1.plot(z, [d['T_0'] for d in res], 'r-', linewidth=2, label=f'Pellet Center T₀ (max={T0_max:.0f}°C)')
-    ax1.plot(z, [d['T_us'] for d in res], 'm-', linewidth=1.5, label=f'Pellet Surface T_us (max={Tus_max:.0f}°C)')
-    ax1.plot(z, [d['T_ci'] for d in res], 'orange', linewidth=1.5, label=f'Clad Inner T_ci (max={Tci_max:.0f}°C)')
-    ax1.plot(z, [d['T_co'] for d in res], 'g-', linewidth=2, label=f'Clad Outer T_co (max={Tco_max:.0f}°C)')
-    ax1.plot(z, [d['T_b'] for d in res], 'b--', linewidth=2, label=f'Coolant T_b (out={T_out:.0f}°C)')
-    ax1.axhline(y=2200, color='gray', linestyle=':', linewidth=1.5, label='Fuel Melting Limit (2200°C)')
-    ax1.set_xlabel('Axial Position (m)')
-    ax1.set_ylabel('Temperature (°C)')
-    ax1.set_title('AP1000 Hot Channel — Temperature Profiles')
-    ax1.legend(fontsize=7, loc='upper left')
+    # --- 绘图输出 ---
+    plt.rcParams['font.sans-serif'] = ['SimHei']  
+    plt.rcParams['axes.unicode_minus'] = False    
+    
+    fig = plt.figure(figsize=(14, 10))
+    fig.canvas.manager.set_window_title('热工水力计算图表')
+    
+    ax1 = fig.add_subplot(221)
+    ax1.plot(z, T_0_arr, 'r-', lw=2, label=f'芯块中心 T_0 (max={np.max(T_0_arr):.0f}℃)')
+    ax1.plot(z, T_ci_arr, 'orange', lw=1.5, label=f'包壳内表面 T_ci')
+    ax1.plot(z, T_co_arr, 'g-', lw=2, label=f'包壳外表面 T_co')
+    ax1.plot(z, T_b_arr, 'b--', lw=2, label=f'冷却剂 T_b')
+    ax1.set_title("图1: 热通道轴向温度分布")
+    ax1.set_xlabel("轴向高度 (m)")
+    ax1.set_ylabel("温度 (℃)")
     ax1.grid(True, alpha=0.3)
-
-    # (b) 热流密度 & 线功率
-    ax2 = axes[0, 1]
-    color_q = 'red'
-    ax2.plot(z, [d['q_loc'] / 1e6 for d in res], color=color_q, linewidth=2, label="q'' (MW/m²)")
-    ax2.set_xlabel('Axial Position (m)')
-    ax2.set_ylabel('Surface Heat Flux (MW/m²)', color=color_q)
-    ax2.tick_params(axis='y', labelcolor=color_q)
-    ax2b = ax2.twinx()
-    ax2b.plot(z, [d['q_linear'] / 1e3 for d in res], 'b--', linewidth=2, label='q_L (kW/m)')
-    ax2b.set_ylabel('Linear Power (kW/m)', color='blue')
-    ax2b.tick_params(axis='y', labelcolor='blue')
-    ax2.set_title('Heat Flux & Linear Power')
+    ax1.legend(fontsize=9)
+    
+    ax2 = fig.add_subplot(222)
+    line1 = ax2.plot(z, q_flux_arr/1e6, 'r-', lw=2, label="表面热流密度 q''")
+    ax2.set_ylabel("表面热流密度 (MW/m^2)", color='r')
+    ax2_twin = ax2.twinx()
+    line2 = ax2_twin.plot(z, q_L_arr/1000, 'b--', lw=2, label="线功率 q_L")
+    ax2_twin.set_ylabel("线功率 (kW/m)", color='b')
+    lines = line1 + line2
+    labels = [l.get_label() for l in lines]
+    ax2.legend(lines, labels, loc='upper right')
+    ax2.set_title("图2: 热流密度与线功率轴向分布")
     ax2.grid(True, alpha=0.3)
-    lines1, labels1 = ax2.get_legend_handles_labels()
-    lines2, labels2 = ax2b.get_legend_handles_labels()
-    ax2.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc='upper right')
-
-    # (c) DNBR
-    ax3 = axes[1, 0]
-    ax3.plot(z, [d['dnbr'] for d in res], 'k-', linewidth=2)
-    ax3.axhline(y=1.3, color='r', linestyle='--', linewidth=1.5, label='Safety Limit (1.3)')
-    ax3.set_xlabel('Axial Position (m)')
-    ax3.set_ylabel('DNBR')
-    ax3.set_title(f'DNBR Distribution (min = {dnbr_min:.2f})')
-    ax3.set_ylim(0, min(20, max(d['dnbr'] for d in res) * 1.1))
-    ax3.legend()
+    
+    ax3 = fig.add_subplot(223)
+    ax3.plot(z, DNBR_arr, 'k-', lw=2, label=f'DNBR (MDNBR={np.min(DNBR_arr):.2f})')
+    ax3.axhline(1.3, color='r', linestyle='--', label='安全限值 (1.3)')
+    ax3.set_title("图3: DNBR 轴向分布")
+    ax3.set_xlabel("轴向高度 (m)")
+    ax3.set_ylabel("DNBR")
+    ax3.set_ylim(0, max(10, np.min(DNBR_arr)*3))
     ax3.grid(True, alpha=0.3)
-
-    # (d) 气隙导热系数
-    ax4 = axes[1, 1]
-    ax4.plot(z, [d['h_gap'] for d in res], 'darkorange', linewidth=2)
-    ax4.set_xlabel('Axial Position (m)')
-    ax4.set_ylabel('Gap Conductance (W/m²K)')
-    ax4.set_title('Gap Conductance vs Axial Position')
+    ax3.legend()
+    
+    ax4 = fig.add_subplot(224)
+    ax4.plot(z, h_hot_arr, 'c-', lw=2, label='热管冷却剂焓值')
+    ax4.set_title("图4: 热管冷却剂焓值轴向分布")
+    ax4.set_xlabel("轴向高度 (m)")
+    ax4.set_ylabel("焓值 (kJ/kg)")
     ax4.grid(True, alpha=0.3)
-
+    ax4.legend()
+    
     plt.tight_layout()
-    plt.savefig('AP1000_corrected_v2.png', dpi=150)
     plt.show()
 
-    # ---- 数值结果 ----
-    print("\n" + "=" * 60)
-    print("  AP1000 热通道分析结果 (修正版 v2)")
-    print("=" * 60)
-    print(f"  最大芯块中心温度:       {T0_max:.1f} °C", end="")
-    print(f"  {'  ✓ < 2200°C' if T0_max < 2200 else '  ✗ 超限!'}")
-    print(f"  最大芯块表面温度:       {Tus_max:.1f} °C")
-    print(f"  最大包壳内表面温度:     {Tci_max:.1f} °C")
-    print(f"  最大包壳外表面温度:     {Tco_max:.1f} °C")
-    print(f"  热通道出口冷却剂温度:   {T_out:.1f} °C")
-    print(f"  最大线功率密度:         {ql_max / 1e3:.2f} kW/m")
-    print(f"  最小 DNBR:              {dnbr_min:.2f}", end="")
-    print(f"  {'  ✓ > 1.3' if dnbr_min > 1.3 else '  ✗ 低于限值!'}")
-    print("-" * 60)
-    print(f"  摩擦压降:   {dp_f / 1e3:.2f} kPa")
-    print(f"  重力压降:   {dp_g / 1e3:.2f} kPa")
-    print(f"  格架压降:   {dp_grid / 1e3:.2f} kPa")
-    print(f"  总压降:     {dp_total / 1e3:.2f} kPa")
-    print("=" * 60)
 
-    # ---- 温度分解表（峰值位置）----
-    i_peak = np.argmax([d['T_0'] for d in res])
-    d = res[i_peak]
-    print(f"\n  峰值位置 z = {d['z']:.3f} m 处的温度分解:")
-    print(f"  {'─' * 45}")
-    print(f"  冷却剂温度 T_b:         {d['T_b']:.1f} °C")
-    print(f"  对流温升 ΔT_conv:       {d['T_co'] - d['T_b']:.1f} °C")
-    print(f"  包壳温升 ΔT_clad:       {d['T_ci'] - d['T_co']:.1f} °C")
-    print(f"  气隙温升 ΔT_gap:        {d['T_us'] - d['T_ci']:.1f} °C")
-    print(f"  芯块温升 ΔT_fuel:       {d['T_0'] - d['T_us']:.1f} °C")
-    print(f"  {'─' * 45}")
-    print(f"  芯块中心温度 T_0:       {d['T_0']:.1f} °C")
-    print(f"  局部线功率:             {d['q_linear'] / 1e3:.2f} kW/m")
-    print(f"  局部 DNBR:              {d['dnbr']:.2f}")
+# =============================================================================
+# 3. UI 界面构建
+# =============================================================================
+def create_ui():
+    root = tk.Tk()
+    root.title("堆芯热工水力计算程序")
+    root.geometry("850x650")
+    
+    # 默认参数字典
+    default_params = {
+        "系统压力 P_SYS (MPa)": ("P_SYS", 15.51),
+        "饱和温度 T_SAT (℃)": ("T_SAT", 344.8),
+        "堆芯总热功率 Q_total (W)": ("Q_total", 3400e6),
+        "冷却剂总流量 W_total (kg/s)": ("W_total", 14314.0),
+        "入口温度 T_in (℃)": ("T_in", 279.4),
+        "堆芯高度 H_core (m)": ("H_core", 4.2672),
+        "组件数 N_assy": ("N_assy", 157),
+        "每组件燃料棒数 N_rods": ("N_rods_per_assy", 264),
+        "包壳外径 D_co (m)": ("D_co", 9.5e-3),
+        "包壳内径 D_ci (m)": ("D_ci", 8.36e-3),
+        "芯块直径 D_p (m)": ("D_p", 8.19e-3),
+        "栅距 Pitch (m)": ("Pitch", 12.6e-3),
+        "旁流系数 Bypass_ratio": ("Bypass_ratio", 0.059),
+        "燃料元件发热份额": ("Heat_frac", 0.974),
+        "热流量核热点因子 F_q_N": ("F_q_N", 2.524),
+        "热流量工程热点因子 F_q_E": ("F_q_E", 1.03),
+        "焓升工程热点因子 F_dH_E": ("F_dH_E", 1.085)
+    }
+
+    entries = {}
+
+    # 顶部参数输入区
+    frame_inputs = ttk.LabelFrame(root, text="输入参数", padding=(10, 10))
+    frame_inputs.pack(fill="x", padx=10, pady=10)
+
+    row, col = 0, 0
+    for label_text, (key, default_val) in default_params.items():
+        ttk.Label(frame_inputs, text=label_text).grid(row=row, column=col*2, sticky="e", padx=5, pady=5)
+        entry = ttk.Entry(frame_inputs, width=15)
+        entry.insert(0, str(default_val))
+        entry.grid(row=row, column=col*2+1, sticky="w", padx=5, pady=5)
+        entries[key] = entry
+        
+        col += 1
+        if col > 2:  # 每行显示3个参数
+            col = 0
+            row += 1
+
+    # 底部结果显示区
+    frame_output = ttk.LabelFrame(root, text="计算结果报告", padding=(10, 10))
+    frame_output.pack(fill="both", expand=True, padx=10, pady=5)
+    
+    text_output = scrolledtext.ScrolledText(frame_output, wrap=tk.WORD, font=("Consolas", 10))
+    text_output.pack(fill="both", expand=True)
+
+    # 运行按钮回调函数
+    def on_run():
+        try:
+            # 读取所有输入框的值并转换为浮点数
+            params = {key: float(entry.get()) for key, entry in entries.items()}
+            text_output.delete(1.0, tk.END)
+            text_output.insert(tk.END, "正在计算中，请稍候...\n")
+            root.update()
+            
+            # 执行计算
+            run_calculation(params, text_output)
+            
+        except ValueError:
+            messagebox.showerror("输入错误", "请确保所有参数均输入了合法的数字！")
+        except Exception as e:
+            messagebox.showerror("计算错误", f"计算过程中发生异常:\n{str(e)}")
+
+    # 运行按钮
+    btn_run = ttk.Button(root, text="🚀 开始计算并生成图表", command=on_run)
+    btn_run.pack(pady=10, ipadx=20, ipady=5)
+
+    root.mainloop()
+
+if __name__ == "__main__":
+    create_ui()
