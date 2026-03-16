@@ -145,7 +145,8 @@ def run_calculation(params):
     dp_h_e = dp_avg_total
 
     G_hot = G_avg * 0.95  
-    epsilon = 1e-4
+    rel_tol = 1e-4
+    abs_tol = 1.0  # Pa; guard for very small dp
     h_hot_arr = np.zeros(n_nodes)
     
     for iteration in range(100):
@@ -168,8 +169,11 @@ def run_calculation(params):
                         K_in * dyn_p_in_hot + K_out * dyn_p_out_hot + 
                         N_grid * K_grid * dyn_p_avg_hot)
         
-        if abs((dp_hot_total - dp_h_e) / dp_h_e) <= epsilon:
+        err = abs(dp_hot_total - dp_h_e)
+        if err <= max(rel_tol * abs(dp_h_e), abs_tol):
             break
+        if dp_hot_total <= 0 or dp_h_e <= 0:
+            raise ValueError("压降计算出现非正值，无法进行等压降迭代。请检查输入参数。")
         G_hot = G_hot * np.sqrt(dp_h_e / dp_hot_total)
 
     T_b_arr, T_co_arr, T_ci_arr, T_us_arr, T_0_arr = [np.zeros(n_nodes) for _ in range(5)]
@@ -216,15 +220,17 @@ def run_calculation(params):
         DNBR_arr[i] = chf / max(q_flux_local, 1e-6)
 
     # --- 报告生成 ---
-    report = f"""堆芯冷却剂出口温度:     {T_out_avg:.2f} ℃
-                燃料棒表面平均热流密度: {q_flux_avg/1e6:.3f} MW/m²
-                燃料棒表面最大热流密度: {q_flux_max/1e6:.3f} MW/m²
-                平均线功率:             {q_L_avg/1000:.2f} kW/m
-                最大线功率:             {q_L_max/1000:.2f} kW/m
-                包壳表面最高温度:       {np.max(T_co_arr):.1f} ℃
-                芯块中心最高温度:       {np.max(T_0_arr):.1f} ℃
-                最小 DNBR 值:           {np.min(DNBR_arr):.2f}
-                计算堆芯压降:           {dp_avg_total/1000:.2f} kPa"""
+    report = (
+        f"堆芯冷却剂出口温度:     {T_out_avg:.2f} ℃\n"
+        f"燃料棒表面平均热流密度: {q_flux_avg/1e6:.3f} MW/m²\n"
+        f"燃料棒表面最大热流密度: {q_flux_max/1e6:.3f} MW/m²\n"
+        f"平均线功率:             {q_L_avg/1000:.2f} kW/m\n"
+        f"最大线功率:             {q_L_max/1000:.2f} kW/m\n"
+        f"包壳表面最高温度:       {np.max(T_co_arr):.1f} ℃\n"
+        f"芯块中心最高温度:       {np.max(T_0_arr):.1f} ℃\n"
+        f"最小 DNBR 值:           {np.min(DNBR_arr):.2f}\n"
+        f"计算堆芯压降:           {dp_avg_total/1000:.2f} kPa"
+    )
 
     # --- 绘图生成 ---
     plt.rcParams['font.sans-serif'] = ['SimHei']  
@@ -258,7 +264,7 @@ def run_calculation(params):
     
     ax3 = fig.add_subplot(223)
     ax3.plot(z, DNBR_arr, 'k-', lw=2, label=f'DNBR (MDNBR={np.min(DNBR_arr):.2f})')
-    ax3.axhline(1.14, color='r', linestyle='--', label='安全限值1.3')
+    ax3.axhline(1.3, color='r', linestyle='--', label='安全限值 (1.3)')
     ax3.set_title("图3: DNBR 轴向分布")
     ax3.set_xlabel("轴向高度 (m)")
     ax3.set_ylabel("DNBR")
